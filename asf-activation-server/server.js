@@ -25,12 +25,13 @@ const DB_FILE = process.env.DB_FILE || 'activation.db';
 // 中间件配置
 // ============================================
 
-// 安全头（调整 CSP 以允许 admin.html 内联脚本和媒体资源）
+// 安全头（调整 CSP 以允许 admin.html 内联脚本、事件处理器和媒体资源）
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-hashes'"],
+      scriptSrcAttr: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:"],
       mediaSrc: ["'self'", "data:"]

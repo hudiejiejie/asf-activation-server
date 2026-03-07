@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: asf-activation-server
+    env: node
+    plan: free
+    buildCommand: npm ci --only=production
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: DB_FILE
+        value: activation.db
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

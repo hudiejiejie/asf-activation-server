@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  asf-activation:
+    build: .
+    container_name: asf-activation-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # 请修改为您的强密码
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-change-me-in-production}
+      - DB_FILE=/data/activation.db
+      # 可选：设置 CORS 来源
+      # - CORS_ORIGIN=https://your-domain.com
+    volumes:
+      - ./data:/app/data:rw
+      - ./logs:/app/logs:rw
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - asf-network
+
+networks:
+  asf-network:
+    driver: bridge

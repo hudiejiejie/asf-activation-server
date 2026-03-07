@@ -88,10 +88,12 @@ db.serialize(() => {
     used_by TEXT,
     used_at DATETIME,
     machine_id TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_code (code),
-    INDEX idx_used (used)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // 为激活码表创建索引
+  db.run(`CREATE INDEX IF NOT EXISTS idx_code ON activation_codes (code)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_used ON activation_codes (used)`);
 
   // 机器指纹表
   db.run(`CREATE TABLE IF NOT EXISTS machine_fingerprints (
@@ -99,9 +101,11 @@ db.serialize(() => {
     machine_id TEXT UNIQUE NOT NULL,
     first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_seen DATETIME,
-    usage_count INTEGER DEFAULT 0,
-    INDEX idx_machine_id (machine_id)
+    usage_count INTEGER DEFAULT 0
   )`);
+
+  // 为机器指纹表创建索引
+  db.run(`CREATE INDEX IF NOT EXISTS idx_machine_id ON machine_fingerprints (machine_id)`);
 
   // 验证日志表（审计）
   db.run(`CREATE TABLE IF NOT EXISTS verification_logs (
@@ -112,11 +116,13 @@ db.serialize(() => {
     user_agent TEXT,
     result BOOLEAN,
     message TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_timestamp (timestamp),
-    INDEX idx_code (code),
-    INDEX idx_machine_id (machine_id)
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // 为验证日志表创建索引
+  db.run(`CREATE INDEX IF NOT EXISTS idx_timestamp ON verification_logs (timestamp)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_log_code ON verification_logs (code)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_log_machine_id ON verification_logs (machine_id)`);
 
   // 统计表
   db.run(`CREATE TABLE IF NOT EXISTS statistics (

@@ -629,6 +629,33 @@ app.get('/api/backup/list/:machineId', backupLimiter, requireBackupAuth, (req, r
   }
 });
 
+app.get('/api/backup/file/:machineId/:backupId/:fileName', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    const machineId = String(req.params.machineId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const backupId = String(req.params.backupId || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const fileName = String(req.params.fileName || '');
+    const allowed = new Set(['meta.json', 'archive.bin', 'nonce.bin', 'tag.bin']);
+
+    if (!allowed.has(fileName)) {
+      return res.status(400).json({ success: false, message: '非法文件名' });
+    }
+
+    const fullPath = path.join(BACKUP_ROOT, machineId, backupId, fileName);
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ success: false, message: '备份文件不存在' });
+    }
+
+    if (fileName === 'meta.json') {
+      return res.sendFile(fullPath);
+    }
+
+    return res.download(fullPath, fileName);
+  } catch (error) {
+    console.error('备份文件下载失败:', error.message);
+    return res.status(500).json({ success: false, message: '备份文件下载失败' });
+  }
+});
+
 // ============================================
 // Web 管理界面
 // ============================================

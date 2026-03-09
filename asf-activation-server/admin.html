@@ -335,6 +335,7 @@
       <button class="tab-btn active" onclick="switchTab('generate')">生成激活码</button>
       <button class="tab-btn" onclick="switchTab('codes')">激活码列表</button>
       <button class="tab-btn" onclick="switchTab('machines')">机器管理</button>
+      <button class="tab-btn" onclick="switchTab('backups')">备份恢复</button>
       <button class="tab-btn" onclick="switchTab('logs')">验证日志</button>
     </div>
     
@@ -346,9 +347,6 @@
     <div class="form-group" style="margin-bottom: 0;">
       <label>管理员 API 密钥</label>
       <input type="password" id="apiKey" placeholder="输入您的管理员 API 密钥" onchange="saveApiKey()">
-      <small style="color: #666; display: block; margin-top: 5px;">
-        从 Render Dashboard → Environment 中复制 <code>ADMIN_API_KEY</code> 的值
-      </small>
     </div>
   </div>
   
@@ -434,6 +432,43 @@
       </table>
     </div>
   </div>
+
+  <!-- 备份恢复 -->
+  <div id="tab-backups" class="card tab-content">
+    <h2>备份恢复</h2>
+
+    <div class="form-group">
+      <label>机器 ID</label>
+      <input type="text" id="backupMachineId" placeholder="输入机器 ID，例如 1c1cf8d0f2dda1571c91c160bc2c8aa1">
+    </div>
+
+    <div class="form-group">
+      <label>备份解密密钥（Base64，本地保存）</label>
+      <input type="password" id="backupDecryptKey" placeholder="输入客户端 steam.json 中的 EncryptionKeyBase64" onchange="saveBackupDecryptKey()">
+    </div>
+
+    <div style="margin-bottom: 15px;">
+      <button class="btn btn-small" onclick="loadBackups()">加载备份</button>
+      <button class="btn btn-small" onclick="clearBackups()">清空列表</button>
+    </div>
+
+    <div id="backupResult" style="margin-bottom: 15px;"></div>
+
+    <div style="overflow-x: auto;">
+      <table id="backupsTable">
+        <thead>
+          <tr>
+            <th>备份目录</th>
+            <th>时间</th>
+            <th>原因</th>
+            <th>文件数</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
   
   <!-- 验证日志 -->
   <div id="tab-logs" class="card tab-content">
@@ -468,10 +503,12 @@ const pageSize = 50;
 let allCodes = [];
 let allMachines = [];
 let allLogs = [];
+let allBackups = [];
 
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
   loadApiKey();
+  loadBackupDecryptKey();
   loadStats();
   loadCodes();
   loadMachines();
@@ -503,6 +540,24 @@ function getApiKey() {
   return document.getElementById('apiKey').value;
 }
 
+function saveBackupDecryptKey() {
+  const key = document.getElementById('backupDecryptKey')?.value || '';
+  if (key) {
+    localStorage.setItem('backupDecryptKey', key);
+  }
+}
+
+function loadBackupDecryptKey() {
+  const savedKey = localStorage.getItem('backupDecryptKey');
+  if (savedKey && document.getElementById('backupDecryptKey')) {
+    document.getElementById('backupDecryptKey').value = savedKey;
+  }
+}
+
+function getBackupDecryptKey() {
+  return document.getElementById('backupDecryptKey')?.value?.trim() || '';
+}
+
 // 标签页切换
 function switchTab(tabName) {
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -518,6 +573,8 @@ function switchTab(tabName) {
     loadCodes();
   } else if (tabName === 'machines') {
     loadMachines();
+  } else if (tabName === 'backups') {
+    // 手动输入机器ID后再加载
   } else if (tabName === 'logs') {
     loadLogs();
   }
@@ -783,6 +840,124 @@ function searchMachines() {
 function showMachineDetails(machineId) {
   // 这里可以扩展显示该机器使用的所有激活码
   alert(`机器ID: ${machineId}\n\n查看该机器的激活记录需要查询验证日志。`);
+}
+
+// ============================================
+// 备份恢复
+// ============================================
+
+async function loadBackups() {
+  const apiKey = getApiKey();
+  const machineId = (document.getElementById('backupMachineId').value || '').trim();
+
+  if (!apiKey) {
+    showAlert('请先输入管理员 API 密钥', 'error', 'backupResult');
+    return;
+  }
+
+  if (!machineId) {
+    showAlert('请输入机器 ID', 'error', 'backupResult');
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/backup/list/${encodeURIComponent(machineId)}?apiKey=${encodeURIComponent(apiKey)}`);
+    const data = await res.json();
+    if (!data.success) {
+      showAlert('加载备份失败: ' + data.message, 'error', 'backupResult');
+      return;
+    }
+
+    allBackups = data.items || [];
+    renderBackupsTable(machineId, allBackups);
+    showAlert(`已加载 ${allBackups.length} 条备份`, 'success', 'backupResult');
+  } catch (e) {
+    showAlert('加载备份失败: ' + e.message, 'error', 'backupResult');
+  }
+}
+
+function clearBackups() {
+  allBackups = [];
+  document.querySelector('#backupsTable tbody').innerHTML = '';
+  document.getElementById('backupResult').innerHTML = '';
+}
+
+function renderBackupsTable(machineId, items) {
+  const tbody = document.querySelector('#backupsTable tbody');
+  tbody.innerHTML = items.map(item => {
+    const createdAt = item.meta?.createdAtUtc ? new Date(item.meta.createdAtUtc).toLocaleString() : '-';
+    const reason = item.meta?.reason || '-';
+    const count = item.meta?.fileCount ?? '-';
+    return `
+      <tr>
+        <td style="font-family: monospace; font-size: 12px;">${item.name}</td>
+        <td>${createdAt}</td>
+        <td>${reason}</td>
+        <td>${count}</td>
+        <td>
+          <button class="btn btn-small btn-success" onclick="downloadBackupZip('${machineId}', '${item.name}')">下载恢复 ZIP</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function base64ToBytes(base64) {
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function concatBytes(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+async function downloadBackupZip(machineId, backupId) {
+  const apiKey = getApiKey();
+  const decryptKey = getBackupDecryptKey();
+
+  if (!decryptKey) {
+    showAlert('请先输入备份解密密钥（Base64）', 'error', 'backupResult');
+    return;
+  }
+
+  try {
+    const [metaRes, archiveRes, nonceRes, tagRes] = await Promise.all([
+      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/meta.json?apiKey=${encodeURIComponent(apiKey)}`),
+      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/archive.bin?apiKey=${encodeURIComponent(apiKey)}`),
+      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/nonce.bin?apiKey=${encodeURIComponent(apiKey)}`),
+      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/tag.bin?apiKey=${encodeURIComponent(apiKey)}`)
+    ]);
+
+    if (!metaRes.ok || !archiveRes.ok || !nonceRes.ok || !tagRes.ok) {
+      throw new Error('备份文件下载失败');
+    }
+
+    const meta = await metaRes.json();
+    const archive = new Uint8Array(await archiveRes.arrayBuffer());
+    const nonce = new Uint8Array(await nonceRes.arrayBuffer());
+    const tag = new Uint8Array(await tagRes.arrayBuffer());
+    const rawKey = base64ToBytes(decryptKey);
+    const cryptoKey = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+    const cipherWithTag = concatBytes(archive, tag);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce, tagLength: 128 }, cryptoKey, cipherWithTag);
+
+    const blob = new Blob([plain], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = (meta.createdAtUtc || new Date().toISOString()).replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = `${machineId}_${stamp}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showAlert('恢复包已下载到本地', 'success', 'backupResult');
+  } catch (e) {
+    showAlert('下载恢复失败: ' + e.message, 'error', 'backupResult');
+  }
 }
 
 // ============================================

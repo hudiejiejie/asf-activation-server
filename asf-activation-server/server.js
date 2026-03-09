@@ -13,30 +13,25 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'change-me-in-production';
+const BACKUP_API_KEY = process.env.BACKUP_API_KEY || ADMIN_API_KEY;
 
 // 数据库文件
 const DB_FILE = process.env.DB_FILE || 'activation.db';
+const BACKUP_ROOT = process.env.BACKUP_ROOT || path.join(__dirname, 'data', 'backups');
+fs.mkdirSync(BACKUP_ROOT, { recursive: true });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 512 } });
 
 // ============================================
 // 中间件配置
 // ============================================
 
-// 安全头（调整 CSP 以允许 admin.html 内联脚本、事件处理器和媒体资源）
+// 安全头
 app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-hashes'"],
-      scriptSrcAttr: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:"],
-      mediaSrc: ["'self'", "data:"]
-    }
-  },
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
@@ -76,6 +71,25 @@ const adminLimiter = rateLimit({
   message: { success: false, message: '管理API请求过于频繁' }
 });
 
+const backupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  message: { success: false, message: '备份请求过于频繁' }
+});
+
+function requireBackupAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const bodyToken = req.body?.apiKey || req.query?.apiKey || '';
+  const token = bearerToken || bodyToken;
+
+  if (token !== BACKUP_API_KEY) {
+    return res.status(401).json({ success: false, message: '未授权' });
+  }
+
+  next();
+}
+
 // ============================================
 // 数据库初始化
 // ============================================
@@ -101,10 +115,6 @@ db.serialize(() => {
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  // 为激活码表创建索引
-  db.run(`CREATE INDEX IF NOT EXISTS idx_code ON activation_codes (code)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_used ON activation_codes (used)`);
-
   // 机器指纹表
   db.run(`CREATE TABLE IF NOT EXISTS machine_fingerprints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,9 +123,6 @@ db.serialize(() => {
     last_seen DATETIME,
     usage_count INTEGER DEFAULT 0
   )`);
-
-  // 为机器指纹表创建索引
-  db.run(`CREATE INDEX IF NOT EXISTS idx_machine_id ON machine_fingerprints (machine_id)`);
 
   // 验证日志表（审计）
   db.run(`CREATE TABLE IF NOT EXISTS verification_logs (
@@ -129,11 +136,6 @@ db.serialize(() => {
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  // 为验证日志表创建索引
-  db.run(`CREATE INDEX IF NOT EXISTS idx_timestamp ON verification_logs (timestamp)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_log_code ON verification_logs (code)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_log_machine_id ON verification_logs (machine_id)`);
-
   // 统计表
   db.run(`CREATE TABLE IF NOT EXISTS statistics (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -142,6 +144,14 @@ db.serialize(() => {
     total_machines INTEGER DEFAULT 0,
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // 独立索引（SQLite 兼容）
+  db.run(`CREATE INDEX IF NOT EXISTS idx_activation_codes_code ON activation_codes(code)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_activation_codes_used ON activation_codes(used)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_machine_fingerprints_machine_id ON machine_fingerprints(machine_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_verification_logs_timestamp ON verification_logs(timestamp)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_verification_logs_code ON verification_logs(code)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_verification_logs_machine_id ON verification_logs(machine_id)`);
 
   // 插入初始统计记录（如果不存在）
   db.run(`INSERT OR IGNORE INTO statistics (id, total_codes, total_used, total_machines) 
@@ -549,6 +559,74 @@ app.delete('/api/admin/code/:code', adminLimiter, (req, res) => {
       res.json({ success: true, message: '激活码已撤销，可重新使用' });
     }
   );
+});
+
+// ============================================
+// 备份接口
+// ============================================
+
+app.post('/api/backup/upload', backupLimiter, requireBackupAuth, upload.fields([
+  { name: 'metadata', maxCount: 1 },
+  { name: 'nonce', maxCount: 1 },
+  { name: 'tag', maxCount: 1 },
+  { name: 'archive', maxCount: 1 }
+]), (req, res) => {
+  try {
+    const metadataRaw = req.body.metadata || '{}';
+    const metadata = JSON.parse(metadataRaw);
+    const archive = req.files?.archive?.[0];
+    const nonce = req.files?.nonce?.[0];
+    const tag = req.files?.tag?.[0];
+    const algorithm = req.body.algorithm || 'unknown';
+
+    if (!archive || !nonce || !tag) {
+      return res.status(400).json({ success: false, message: '缺少备份内容' });
+    }
+
+    const machineId = String(metadata.machineId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const random = crypto.randomBytes(4).toString('hex');
+    const outDir = path.join(BACKUP_ROOT, machineId, `${stamp}_${random}`);
+    fs.mkdirSync(outDir, { recursive: true });
+
+    fs.writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify({ ...metadata, algorithm }, null, 2));
+    fs.writeFileSync(path.join(outDir, 'archive.bin'), archive.buffer);
+    fs.writeFileSync(path.join(outDir, 'nonce.bin'), nonce.buffer);
+    fs.writeFileSync(path.join(outDir, 'tag.bin'), tag.buffer);
+
+    return res.json({ success: true, message: '备份上传成功' });
+  } catch (error) {
+    console.error('备份上传失败:', error.message);
+    return res.status(500).json({ success: false, message: '备份上传失败' });
+  }
+});
+
+app.get('/api/backup/list/:machineId', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    const machineId = String(req.params.machineId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dir = path.join(BACKUP_ROOT, machineId);
+
+    if (!fs.existsSync(dir)) {
+      return res.json({ success: true, items: [] });
+    }
+
+    const items = fs.readdirSync(dir)
+      .sort()
+      .reverse()
+      .map(name => {
+        const metaPath = path.join(dir, name, 'meta.json');
+        let meta = null;
+        if (fs.existsSync(metaPath)) {
+          meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        }
+        return { name, meta };
+      });
+
+    return res.json({ success: true, items });
+  } catch (error) {
+    console.error('备份列表查询失败:', error.message);
+    return res.status(500).json({ success: false, message: '备份列表查询失败' });
+  }
 });
 
 // ============================================

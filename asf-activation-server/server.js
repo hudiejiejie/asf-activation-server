@@ -32,7 +32,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 102
 
 // 安全头
 app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false
 }));
 
 // CORS 配置（允许前端调用）

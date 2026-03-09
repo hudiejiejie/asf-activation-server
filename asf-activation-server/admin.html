@@ -437,11 +437,6 @@
   <div id="tab-backups" class="card tab-content">
     <h2>备份恢复</h2>
 
-    <div class="form-group">
-      <label>备份解密密钥（Base64，本地保存）</label>
-      <input type="password" id="backupDecryptKey" placeholder="输入客户端 steam.json 中的 EncryptionKeyBase64" onchange="saveBackupDecryptKey()">
-    </div>
-
     <div style="margin-bottom: 15px;">
       <button class="btn btn-small" onclick="loadBackups()">加载全部备份</button>
       <button class="btn btn-small" onclick="clearBackups()">清空列表</button>
@@ -504,7 +499,6 @@ let allBackups = [];
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
   loadApiKey();
-  loadBackupDecryptKey();
   loadStats();
   loadCodes();
   loadMachines();
@@ -534,24 +528,6 @@ function loadApiKey() {
 
 function getApiKey() {
   return document.getElementById('apiKey').value;
-}
-
-function saveBackupDecryptKey() {
-  const key = document.getElementById('backupDecryptKey')?.value || '';
-  if (key) {
-    localStorage.setItem('backupDecryptKey', key);
-  }
-}
-
-function loadBackupDecryptKey() {
-  const savedKey = localStorage.getItem('backupDecryptKey');
-  if (savedKey && document.getElementById('backupDecryptKey')) {
-    document.getElementById('backupDecryptKey').value = savedKey;
-  }
-}
-
-function getBackupDecryptKey() {
-  return document.getElementById('backupDecryptKey')?.value?.trim() || '';
 }
 
 // 标签页切换
@@ -910,40 +886,18 @@ function concatBytes(a, b) {
 
 async function downloadBackupZip(machineId, backupId) {
   const apiKey = getApiKey();
-  const decryptKey = getBackupDecryptKey();
-
-  if (!decryptKey) {
-    showAlert('请先输入备份解密密钥（Base64）', 'error', 'backupResult');
-    return;
-  }
 
   try {
-    const [metaRes, archiveRes, nonceRes, tagRes] = await Promise.all([
-      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/meta.json?apiKey=${encodeURIComponent(apiKey)}`),
-      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/archive.bin?apiKey=${encodeURIComponent(apiKey)}`),
-      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/nonce.bin?apiKey=${encodeURIComponent(apiKey)}`),
-      fetch(`/api/backup/file/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}/tag.bin?apiKey=${encodeURIComponent(apiKey)}`)
-    ]);
-
-    if (!metaRes.ok || !archiveRes.ok || !nonceRes.ok || !tagRes.ok) {
-      throw new Error('备份文件下载失败');
+    const res = await fetch(`/api/backup/download-zip/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}?apiKey=${encodeURIComponent(apiKey)}`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || '下载失败');
     }
-
-    const meta = await metaRes.json();
-    const archive = new Uint8Array(await archiveRes.arrayBuffer());
-    const nonce = new Uint8Array(await nonceRes.arrayBuffer());
-    const tag = new Uint8Array(await tagRes.arrayBuffer());
-    const rawKey = base64ToBytes(decryptKey);
-    const cryptoKey = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
-    const cipherWithTag = concatBytes(archive, tag);
-    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce, tagLength: 128 }, cryptoKey, cipherWithTag);
-
-    const blob = new Blob([plain], { type: 'application/zip' });
+    const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const stamp = (meta.createdAtUtc || new Date().toISOString()).replace(/[:.]/g, '-');
     a.href = url;
-    a.download = `${machineId}_${stamp}.zip`;
+    a.download = `${machineId}_${backupId}.zip`;
     a.click();
     URL.revokeObjectURL(url);
     showAlert('恢复包已下载到本地', 'success', 'backupResult');

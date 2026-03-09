@@ -91,6 +91,10 @@ function requireBackupAuth(req, res, next) {
   next();
 }
 
+function getBackupKey() {
+  return crypto.createHash('sha256').update(String(BACKUP_API_KEY).trim(), 'utf8').digest();
+}
+
 // ============================================
 // 数据库初始化
 // ============================================
@@ -685,6 +689,37 @@ app.get('/api/backup/file/:machineId/:backupId/:fileName', backupLimiter, requir
   } catch (error) {
     console.error('备份文件下载失败:', error.message);
     return res.status(500).json({ success: false, message: '备份文件下载失败' });
+  }
+});
+
+app.get('/api/backup/download-zip/:machineId/:backupId', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    const machineId = String(req.params.machineId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const backupId = String(req.params.backupId || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const dir = path.join(BACKUP_ROOT, machineId, backupId);
+    const metaPath = path.join(dir, 'meta.json');
+    const archivePath = path.join(dir, 'archive.bin');
+    const noncePath = path.join(dir, 'nonce.bin');
+    const tagPath = path.join(dir, 'tag.bin');
+
+    if (![metaPath, archivePath, noncePath, tagPath].every(p => fs.existsSync(p))) {
+      return res.status(404).json({ success: false, message: '备份文件不存在' });
+    }
+
+    const key = getBackupKey();
+    const archive = fs.readFileSync(archivePath);
+    const nonce = fs.readFileSync(noncePath);
+    const tag = fs.readFileSync(tagPath);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce);
+    decipher.setAuthTag(tag);
+    const plain = Buffer.concat([decipher.update(archive), decipher.final()]);
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${machineId}_${backupId}.zip"`);
+    return res.send(plain);
+  } catch (error) {
+    console.error('恢复ZIP下载失败:', error.message);
+    return res.status(500).json({ success: false, message: '恢复ZIP下载失败' });
   }
 });
 

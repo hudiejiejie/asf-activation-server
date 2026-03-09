@@ -438,17 +438,12 @@
     <h2>备份恢复</h2>
 
     <div class="form-group">
-      <label>机器 ID</label>
-      <input type="text" id="backupMachineId" placeholder="输入机器 ID，例如 1c1cf8d0f2dda1571c91c160bc2c8aa1">
-    </div>
-
-    <div class="form-group">
       <label>备份解密密钥（Base64，本地保存）</label>
       <input type="password" id="backupDecryptKey" placeholder="输入客户端 steam.json 中的 EncryptionKeyBase64" onchange="saveBackupDecryptKey()">
     </div>
 
     <div style="margin-bottom: 15px;">
-      <button class="btn btn-small" onclick="loadBackups()">加载备份</button>
+      <button class="btn btn-small" onclick="loadBackups()">加载全部备份</button>
       <button class="btn btn-small" onclick="clearBackups()">清空列表</button>
     </div>
 
@@ -458,6 +453,7 @@
       <table id="backupsTable">
         <thead>
           <tr>
+            <th>机器ID</th>
             <th>备份目录</th>
             <th>时间</th>
             <th>原因</th>
@@ -574,7 +570,7 @@ function switchTab(tabName) {
   } else if (tabName === 'machines') {
     loadMachines();
   } else if (tabName === 'backups') {
-    // 手动输入机器ID后再加载
+    loadBackups();
   } else if (tabName === 'logs') {
     loadLogs();
   }
@@ -848,20 +844,14 @@ function showMachineDetails(machineId) {
 
 async function loadBackups() {
   const apiKey = getApiKey();
-  const machineId = (document.getElementById('backupMachineId').value || '').trim();
 
   if (!apiKey) {
     showAlert('请先输入管理员 API 密钥', 'error', 'backupResult');
     return;
   }
 
-  if (!machineId) {
-    showAlert('请输入机器 ID', 'error', 'backupResult');
-    return;
-  }
-
   try {
-    const res = await fetch(`/api/backup/list/${encodeURIComponent(machineId)}?apiKey=${encodeURIComponent(apiKey)}`);
+    const res = await fetch(`/api/backup/all?apiKey=${encodeURIComponent(apiKey)}`);
     const data = await res.json();
     if (!data.success) {
       showAlert('加载备份失败: ' + data.message, 'error', 'backupResult');
@@ -869,7 +859,7 @@ async function loadBackups() {
     }
 
     allBackups = data.items || [];
-    renderBackupsTable(machineId, allBackups);
+    renderBackupsTable(allBackups);
     showAlert(`已加载 ${allBackups.length} 条备份`, 'success', 'backupResult');
   } catch (e) {
     showAlert('加载备份失败: ' + e.message, 'error', 'backupResult');
@@ -882,14 +872,16 @@ function clearBackups() {
   document.getElementById('backupResult').innerHTML = '';
 }
 
-function renderBackupsTable(machineId, items) {
+function renderBackupsTable(items) {
   const tbody = document.querySelector('#backupsTable tbody');
   tbody.innerHTML = items.map(item => {
     const createdAt = item.meta?.createdAtUtc ? new Date(item.meta.createdAtUtc).toLocaleString() : '-';
     const reason = item.meta?.reason || '-';
     const count = item.meta?.fileCount ?? '-';
+    const machineId = item.machineId || item.meta?.machineId || '-';
     return `
       <tr>
+        <td style="font-family: monospace; font-size: 12px;">${machineId}</td>
         <td style="font-family: monospace; font-size: 12px;">${item.name}</td>
         <td>${createdAt}</td>
         <td>${reason}</td>

@@ -619,13 +619,44 @@ app.get('/api/backup/list/:machineId', backupLimiter, requireBackupAuth, (req, r
         if (fs.existsSync(metaPath)) {
           meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
         }
-        return { name, meta };
+        return { machineId, name, meta };
       });
 
     return res.json({ success: true, items });
   } catch (error) {
     console.error('备份列表查询失败:', error.message);
     return res.status(500).json({ success: false, message: '备份列表查询失败' });
+  }
+});
+
+app.get('/api/backup/all', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    if (!fs.existsSync(BACKUP_ROOT)) {
+      return res.json({ success: true, items: [] });
+    }
+
+    const items = [];
+    for (const machineId of fs.readdirSync(BACKUP_ROOT)) {
+      const machineDir = path.join(BACKUP_ROOT, machineId);
+      if (!fs.statSync(machineDir).isDirectory()) continue;
+
+      for (const name of fs.readdirSync(machineDir).sort().reverse()) {
+        const backupDir = path.join(machineDir, name);
+        if (!fs.statSync(backupDir).isDirectory()) continue;
+        const metaPath = path.join(backupDir, 'meta.json');
+        let meta = null;
+        if (fs.existsSync(metaPath)) {
+          meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        }
+        items.push({ machineId, name, meta });
+      }
+    }
+
+    items.sort((a, b) => String(b.name).localeCompare(String(a.name)));
+    return res.json({ success: true, items });
+  } catch (error) {
+    console.error('全部备份列表查询失败:', error.message);
+    return res.status(500).json({ success: false, message: '全部备份列表查询失败' });
   }
 });
 

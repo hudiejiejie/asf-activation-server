@@ -679,6 +679,35 @@ app.get('/api/backup/all', backupLimiter, requireBackupAuth, (req, res) => {
   }
 });
 
+// 清空所有备份
+app.post('/api/backup/clear-all', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    if (!fs.existsSync(BACKUP_ROOT)) {
+      return res.json({ success: true, message: '备份根目录不存在，无需清理' });
+    }
+
+    let totalDeleted = 0;
+    for (const machineId of fs.readdirSync(BACKUP_ROOT)) {
+      const machineDir = path.join(BACKUP_ROOT, machineId);
+      if (!fs.statSync(machineDir).isDirectory()) continue;
+      for (const backupDir of fs.readdirSync(machineDir)) {
+        const fullDir = path.join(machineDir, backupDir);
+        if (fs.statSync(fullDir).isDirectory()) {
+          fs.rmSync(fullDir, { recursive: true, force: true });
+          totalDeleted++;
+        }
+      }
+      // 清理空的机器目录
+      try { if (fs.readdirSync(machineDir).length === 0) fs.rmdirSync(machineDir); } catch {}
+    }
+
+    return res.json({ success: true, deleted: totalDeleted, message: `已清理 ${totalDeleted} 个备份目录` });
+  } catch (error) {
+    console.error('清空备份失败:', error.message);
+    return res.status(500).json({ success: false, message: '清空失败', error: error.message });
+  }
+});
+
 app.get('/api/backup/file/:machineId/:backupId/:fileName', backupLimiter, requireBackupAuth, (req, res) => {
   try {
     const machineId = String(req.params.machineId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');

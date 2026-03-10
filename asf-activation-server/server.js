@@ -589,9 +589,23 @@ app.post('/api/backup/upload', backupLimiter, requireBackupAuth, upload.fields([
     }
 
     const machineId = String(metadata.machineId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const machineDir = path.join(BACKUP_ROOT, machineId);
+    fs.mkdirSync(machineDir, { recursive: true });
+
+    const latestName = fs.readdirSync(machineDir).sort().reverse()[0];
+    if (latestName) {
+      const latestMetaPath = path.join(machineDir, latestName, 'meta.json');
+      if (fs.existsSync(latestMetaPath)) {
+        const latestMeta = JSON.parse(fs.readFileSync(latestMetaPath, 'utf8'));
+        if (latestMeta && latestMeta.contentSignature && metadata.contentSignature && latestMeta.contentSignature === metadata.contentSignature) {
+          return res.json({ success: true, skipped: true, message: '相同内容，已跳过去重备份' });
+        }
+      }
+    }
+
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const random = crypto.randomBytes(4).toString('hex');
-    const outDir = path.join(BACKUP_ROOT, machineId, `${stamp}_${random}`);
+    const outDir = path.join(machineDir, `${stamp}_${random}`);
     fs.mkdirSync(outDir, { recursive: true });
 
     fs.writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify({ ...metadata, algorithm }, null, 2));

@@ -23,6 +23,42 @@ function safeReadJson(filePath) {
   }
 }
 
+function normalizeBackupEntries(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries.map(entry => ({
+    relativePath: entry?.relativePath || entry?.RelativePath || '',
+    size: Number(entry?.size ?? entry?.Size ?? 0),
+    lastWriteUtc: entry?.lastWriteUtc || entry?.LastWriteUtc || ''
+  })).sort((a, b) => String(a.relativePath).localeCompare(String(b.relativePath)));
+}
+
+function normalizeBackupMeta(meta = {}) {
+  return {
+    ...meta,
+    machineId: meta.machineId || meta.MachineId || 'unknown',
+    machineName: meta.machineName || meta.MachineName || '',
+    reason: meta.reason || meta.Reason || '',
+    fileCount: Number(meta.fileCount ?? meta.FileCount ?? 0),
+    sourceRoot: meta.sourceRoot || meta.SourceRoot || '.',
+    entries: normalizeBackupEntries(meta.entries || meta.Entries),
+    archiveHash: meta.archiveHash || meta.ArchiveHash || null,
+    contentSignature: String(meta.contentSignature || meta.ContentSignature || '').trim()
+  };
+}
+
+function buildMetadataContentSignature(meta = {}) {
+  const normalized = normalizeBackupMeta(meta);
+  const payload = {
+    machineId: normalized.machineId,
+    machineName: normalized.machineName,
+    reason: normalized.reason,
+    fileCount: normalized.fileCount,
+    sourceRoot: normalized.sourceRoot,
+    entries: normalized.entries
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
 function getBackupHash(backupDir, meta) {
   if (meta?.archiveHash) return meta.archiveHash;
   const archivePath = path.join(backupDir, 'archive.bin');
@@ -52,10 +88,10 @@ for (const machineId of fs.readdirSync(BACKUP_ROOT)) {
 
   const seen = new Map();
   for (const item of backups) {
-    const meta = safeReadJson(path.join(item.dir, 'meta.json'));
+    const meta = normalizeBackupMeta(safeReadJson(path.join(item.dir, 'meta.json')) || {});
     const hash = getBackupHash(item.dir, meta);
-    const signature = meta?.contentSignature || null;
-    const key = hash ? `hash:${hash}` : (signature ? `sig:${signature}` : null);
+    const signature = meta?.contentSignature || buildMetadataContentSignature(meta);
+    const key = signature ? `sig:${signature}` : (hash ? `hash:${hash}` : null);
 
     if (!key) continue;
 

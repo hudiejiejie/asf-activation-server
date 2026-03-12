@@ -210,6 +210,50 @@ function getBackupDirs(machineDir) {
     .sort((a, b) => String(b.name).localeCompare(String(a.name)));
 }
 
+function normalizeBackupEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  return entries.map(entry => ({
+    relativePath: entry?.relativePath || entry?.RelativePath || '',
+    size: Number(entry?.size ?? entry?.Size ?? 0),
+    lastWriteUtc: entry?.lastWriteUtc || entry?.LastWriteUtc || ''
+  })).sort((a, b) => String(a.relativePath).localeCompare(String(b.relativePath)));
+}
+
+function buildMetadataContentSignature(metadata = {}) {
+  const normalized = {
+    machineId: metadata.machineId || metadata.MachineId || 'unknown',
+    machineName: metadata.machineName || metadata.MachineName || '',
+    reason: metadata.reason || metadata.Reason || '',
+    fileCount: Number(metadata.fileCount ?? metadata.FileCount ?? 0),
+    sourceRoot: metadata.sourceRoot || metadata.SourceRoot || '.',
+    entries: normalizeBackupEntries(metadata.entries || metadata.Entries)
+  };
+
+  return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+}
+
+function normalizeBackupMetadata(metadata = {}) {
+  const normalized = {
+    ...metadata,
+    machineId: metadata.machineId || metadata.MachineId || 'unknown',
+    machineName: metadata.machineName || metadata.MachineName || '',
+    reason: metadata.reason || metadata.Reason || '',
+    createdAtUtc: metadata.createdAtUtc || metadata.CreatedAtUtc || null,
+    fileCount: Number(metadata.fileCount ?? metadata.FileCount ?? 0),
+    sourceRoot: metadata.sourceRoot || metadata.SourceRoot || '.',
+    randomExeName: metadata.randomExeName || metadata.RandomExeName || '',
+    sha256: metadata.sha256 || metadata.Sha256 || null,
+    entries: normalizeBackupEntries(metadata.entries || metadata.Entries),
+    archiveHash: metadata.archiveHash || metadata.ArchiveHash || null
+  };
+
+  normalized.contentSignature = String(metadata.contentSignature || metadata.ContentSignature || '').trim() || buildMetadataContentSignature(normalized);
+  return normalized;
+}
+
 function getArchiveHashFromBackupDir(backupDir, meta) {
   if (meta?.archiveHash) {
     return meta.archiveHash;
@@ -230,15 +274,18 @@ function getArchiveHashFromBackupDir(backupDir, meta) {
 }
 
 function findDuplicateBackup(machineDir, metadata, archiveHash) {
-  const incomingSignature = metadata?.contentSignature || null;
+  const normalizedIncoming = normalizeBackupMetadata(metadata);
+  const incomingSignature = normalizedIncoming?.contentSignature || null;
   const backupDirs = getBackupDirs(machineDir);
 
   for (const item of backupDirs) {
     const metaPath = path.join(item.dir, 'meta.json');
-    const existingMeta = safeReadJson(metaPath);
-    if (!existingMeta) {
+    const rawExistingMeta = safeReadJson(metaPath);
+    if (!rawExistingMeta) {
       continue;
     }
+
+    const existingMeta = normalizeBackupMetadata(rawExistingMeta);
 
     if (incomingSignature && existingMeta.contentSignature && existingMeta.contentSignature === incomingSignature) {
       return {
@@ -744,7 +791,7 @@ app.post('/api/backup/upload', backupLimiter, requireBackupAuth, upload.fields([
 ]), (req, res) => {
   try {
     const metadataRaw = req.body.metadata || '{}';
-    const metadata = JSON.parse(metadataRaw);
+    const metadata = normalizeBackupMetadata(JSON.parse(metadataRaw));
     const archive = req.files?.archive?.[0];
     const nonce = req.files?.nonce?.[0];
     const tag = req.files?.tag?.[0];
@@ -844,8 +891,9 @@ app.get('/api/backup/list/:machineId', backupLimiter, requireBackupAuth, (req, r
 
     const items = getBackupDirs(dir).map(item => {
       const metaPath = path.join(item.dir, 'meta.json');
-      const meta = safeReadJson(metaPath);
-      return { machineId, name: item.name, meta };
+      const meta = normalizeBackupMetadata(safeReadJson(metaPath) || {});
+      const effectiveMachineId = machineId === 'unknown' ? (meta.machineId || machineId) : machineId;
+      return { machineId: effectiveMachineId, name: item.name, meta };
     });
 
     return res.json({ success: true, items });
@@ -868,8 +916,9 @@ app.get('/api/backup/all', backupLimiter, requireBackupAuth, (req, res) => {
 
       for (const item of getBackupDirs(machineDir)) {
         const metaPath = path.join(item.dir, 'meta.json');
-        const meta = safeReadJson(metaPath);
-        items.push({ machineId, name: item.name, meta });
+        const meta = normalizeBackupMetadata(safeReadJson(metaPath) || {});
+        const effectiveMachineId = machineId === 'unknown' ? (meta.machineId || machineId) : machineId;
+        items.push({ machineId: effectiveMachineId, name: item.name, meta });
       }
     }
 
@@ -989,10 +1038,10 @@ function runBackupDedupe({ dryRun = true } = {}) {
     const seen = new Map();
 
     for (const item of backups) {
-      const meta = safeReadJson(path.join(item.dir, 'meta.json'));
+      const meta = normalizeBackupMetadata(safeReadJson(path.join(item.dir, 'meta.json')) || {});
       const hash = getArchiveHashFromBackupDir(item.dir, meta);
-      const signature = meta?.contentSignature || null;
-      const key = hash ? `hash:${hash}` : (signature ? `sig:${signature}` : null);
+      const signature = meta?.contentSignature || buildMetadataContentSignature(meta);
+      const key = signature ? `sig:${signature}` : (hash ? `hash:${hash}` : null);
       if (!key) continue;
 
       if (!seen.has(key)) {

@@ -995,10 +995,11 @@ async function runBackupDedupeApply() {
 function renderBackupsTable(items) {
   const tbody = document.querySelector('#backupsTable tbody');
   tbody.innerHTML = items.map(item => {
-    const createdAt = item.meta?.createdAtUtc ? new Date(item.meta.createdAtUtc).toLocaleString() : (item.meta?.uploadedAt ? new Date(item.meta.uploadedAt).toLocaleString() : '-');
-    const reason = item.meta?.reason || '-';
-    const count = item.meta?.fileCount ?? '-';
-    const machineId = item.machineId || item.meta?.machineId || '-';
+    const createdAtRaw = item.meta?.createdAtUtc || item.meta?.CreatedAtUtc || item.meta?.uploadedAt || '-';
+    const createdAt = createdAtRaw === '-' ? '-' : new Date(createdAtRaw).toLocaleString();
+    const reason = item.meta?.reason || item.meta?.Reason || '-';
+    const count = item.meta?.fileCount ?? item.meta?.FileCount ?? '-';
+    const machineId = item.machineId || item.meta?.machineId || item.meta?.MachineId || '-';
     const shortMachineId = formatMachineId(machineId);
     const selected = selectedBackups.has(backupSelectionKey(machineId, item.name));
     return `

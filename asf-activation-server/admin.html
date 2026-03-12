@@ -440,6 +440,8 @@
     <div style="margin-bottom: 15px; display: flex; gap: 8px; flex-wrap: wrap;">
       <button class="btn btn-small" onclick="loadBackups()">加载全部备份</button>
       <button class="btn btn-small" onclick="clearBackups()">清空列表</button>
+      <button class="btn btn-small" onclick="previewBackupDedupe()">预演去重</button>
+      <button class="btn btn-small btn-warning" onclick="runBackupDedupeApply()">一键去重清理</button>
       <button class="btn btn-small btn-danger" onclick="deleteSelectedBackups()">删除选中</button>
     </div>
 
@@ -933,6 +935,60 @@ async function deleteSelectedBackups() {
     await loadBackups();
   } catch (e) {
     showAlert('批量删除失败: ' + e.message, 'error', 'backupResult');
+  }
+}
+
+function renderDedupeResult(data) {
+  const lines = [];
+  lines.push(data.message || '去重执行完成');
+  lines.push(`机器数: ${data.machines ?? 0}`);
+  lines.push(`重复组: ${data.duplicateGroups ?? 0}`);
+  lines.push(`${data.mode === 'dry-run' ? '可删除' : '已删除'}: ${data.deleted ?? 0}`);
+  const top = (data.results || []).slice(0, 20);
+  if (top.length) {
+    lines.push('');
+    lines.push('明细（最多显示20条）:');
+    top.forEach(item => {
+      lines.push(`- [${item.machineId}] keep=${item.keep} delete=${item.delete} by=${item.by}`);
+    });
+  }
+  document.getElementById('backupResult').innerHTML = `<div class="alert alert-info" style="white-space: pre-wrap;">${lines.join('\n')}</div>`;
+}
+
+async function previewBackupDedupe() {
+  const apiKey = getApiKey();
+  try {
+    const res = await fetch('/api/backup/dedupe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey, dryRun: true })
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || '预演失败');
+    renderDedupeResult(data);
+  } catch (e) {
+    showAlert('预演去重失败: ' + e.message, 'error', 'backupResult');
+  }
+}
+
+async function runBackupDedupeApply() {
+  const apiKey = getApiKey();
+  if (!confirm('确定执行历史重复备份清理吗？系统将保留最新备份并删除更老的重复项。')) {
+    return;
+  }
+  try {
+    const res = await fetch('/api/backup/dedupe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey, dryRun: false })
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || '执行失败');
+    renderDedupeResult(data);
+    selectedBackups = new Set();
+    await loadBackups();
+  } catch (e) {
+    showAlert('执行去重清理失败: ' + e.message, 'error', 'backupResult');
   }
 }
 

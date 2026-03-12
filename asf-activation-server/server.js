@@ -970,6 +970,79 @@ app.post('/api/backup/delete', backupLimiter, requireBackupAuth, (req, res) => {
   }
 });
 
+function runBackupDedupe({ dryRun = true } = {}) {
+  if (!fs.existsSync(BACKUP_ROOT)) {
+    return { success: true, machines: 0, duplicateGroups: 0, deleted: 0, mode: dryRun ? 'dry-run' : 'apply', results: [] };
+  }
+
+  let totalMachines = 0;
+  let totalGroups = 0;
+  let totalDeleted = 0;
+  const results = [];
+
+  for (const machineId of fs.readdirSync(BACKUP_ROOT)) {
+    const machineDir = path.join(BACKUP_ROOT, machineId);
+    if (!fs.statSync(machineDir).isDirectory()) continue;
+    totalMachines++;
+
+    const backups = getBackupDirs(machineDir);
+    const seen = new Map();
+
+    for (const item of backups) {
+      const meta = safeReadJson(path.join(item.dir, 'meta.json'));
+      const hash = getArchiveHashFromBackupDir(item.dir, meta);
+      const signature = meta?.contentSignature || null;
+      const key = hash ? `hash:${hash}` : (signature ? `sig:${signature}` : null);
+      if (!key) continue;
+
+      if (!seen.has(key)) {
+        seen.set(key, item);
+        continue;
+      }
+
+      totalGroups++;
+      const record = {
+        machineId,
+        keep: seen.get(key).name,
+        delete: item.name,
+        by: key,
+        mode: dryRun ? 'dry-run' : 'apply'
+      };
+      results.push(record);
+
+      if (!dryRun) {
+        fs.rmSync(item.dir, { recursive: true, force: true });
+      }
+      totalDeleted++;
+    }
+  }
+
+  return {
+    success: true,
+    machines: totalMachines,
+    duplicateGroups: totalGroups,
+    deleted: totalDeleted,
+    mode: dryRun ? 'dry-run' : 'apply',
+    results
+  };
+}
+
+app.post('/api/backup/dedupe', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    const dryRun = !(req.body?.dryRun === false || req.query?.dryRun === 'false' || req.query?.apply === 'true');
+    const result = runBackupDedupe({ dryRun });
+    return res.json({
+      ...result,
+      message: dryRun
+        ? `预演完成：扫描 ${result.machines} 台机器，发现 ${result.deleted} 个可删除重复备份`
+        : `去重完成：扫描 ${result.machines} 台机器，删除 ${result.deleted} 个重复备份`
+    });
+  } catch (error) {
+    console.error('执行备份去重失败:', error.message);
+    return res.status(500).json({ success: false, message: '执行备份去重失败', error: error.message });
+  }
+});
+
 app.get('/api/backup/file/:machineId/:backupId/:fileName', backupLimiter, requireBackupAuth, (req, res) => {
   try {
     const machineId = String(req.params.machineId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');

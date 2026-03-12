@@ -95,6 +95,87 @@ function getBackupKey() {
   return crypto.createHash('sha256').update(String(BACKUP_API_KEY).trim(), 'utf8').digest();
 }
 
+function sha256Buffer(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function safeReadJson(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    console.warn('读取 JSON 失败:', filePath, error.message);
+    return null;
+  }
+}
+
+function getBackupDirs(machineDir) {
+  if (!fs.existsSync(machineDir)) {
+    return [];
+  }
+
+  return fs.readdirSync(machineDir)
+    .map(name => ({
+      name,
+      dir: path.join(machineDir, name)
+    }))
+    .filter(item => fs.existsSync(item.dir) && fs.statSync(item.dir).isDirectory())
+    .sort((a, b) => String(b.name).localeCompare(String(a.name)));
+}
+
+function getArchiveHashFromBackupDir(backupDir, meta) {
+  if (meta?.archiveHash) {
+    return meta.archiveHash;
+  }
+
+  const archivePath = path.join(backupDir, 'archive.bin');
+  if (!fs.existsSync(archivePath)) {
+    return null;
+  }
+
+  try {
+    const archiveBuffer = fs.readFileSync(archivePath);
+    return sha256Buffer(archiveBuffer);
+  } catch (error) {
+    console.warn('计算历史备份 archiveHash 失败:', backupDir, error.message);
+    return null;
+  }
+}
+
+function findDuplicateBackup(machineDir, metadata, archiveHash) {
+  const incomingSignature = metadata?.contentSignature || null;
+  const backupDirs = getBackupDirs(machineDir);
+
+  for (const item of backupDirs) {
+    const metaPath = path.join(item.dir, 'meta.json');
+    const existingMeta = safeReadJson(metaPath);
+    if (!existingMeta) {
+      continue;
+    }
+
+    if (incomingSignature && existingMeta.contentSignature && existingMeta.contentSignature === incomingSignature) {
+      return {
+        type: 'contentSignature',
+        backupName: item.name,
+        meta: existingMeta
+      };
+    }
+
+    const existingArchiveHash = getArchiveHashFromBackupDir(item.dir, existingMeta);
+    if (existingArchiveHash && existingArchiveHash === archiveHash) {
+      return {
+        type: 'archiveHash',
+        backupName: item.name,
+        meta: existingMeta
+      };
+    }
+  }
+
+  return null;
+}
+
 // ============================================
 // 数据库初始化
 // ============================================
@@ -592,15 +673,16 @@ app.post('/api/backup/upload', backupLimiter, requireBackupAuth, upload.fields([
     const machineDir = path.join(BACKUP_ROOT, machineId);
     fs.mkdirSync(machineDir, { recursive: true });
 
-    const latestName = fs.readdirSync(machineDir).sort().reverse()[0];
-    if (latestName) {
-      const latestMetaPath = path.join(machineDir, latestName, 'meta.json');
-      if (fs.existsSync(latestMetaPath)) {
-        const latestMeta = JSON.parse(fs.readFileSync(latestMetaPath, 'utf8'));
-        if (latestMeta && latestMeta.contentSignature && metadata.contentSignature && latestMeta.contentSignature === metadata.contentSignature) {
-          return res.json({ success: true, skipped: true, message: '相同内容，已跳过去重备份' });
-        }
-      }
+    const archiveHash = sha256Buffer(archive.buffer);
+    const duplicate = findDuplicateBackup(machineDir, metadata, archiveHash);
+    if (duplicate) {
+      return res.json({
+        success: true,
+        skipped: true,
+        message: '相同内容，已跳过去重备份',
+        duplicateBy: duplicate.type,
+        existingBackup: duplicate.backupName
+      });
     }
 
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -608,12 +690,26 @@ app.post('/api/backup/upload', backupLimiter, requireBackupAuth, upload.fields([
     const outDir = path.join(machineDir, `${stamp}_${random}`);
     fs.mkdirSync(outDir, { recursive: true });
 
-    fs.writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify({ ...metadata, algorithm }, null, 2));
+    const metaToSave = {
+      ...metadata,
+      algorithm,
+      archiveHash,
+      uploadedAt: new Date().toISOString(),
+      archiveSize: archive.size || archive.buffer?.length || 0,
+      dedupeVersion: 2
+    };
+
+    fs.writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify(metaToSave, null, 2));
     fs.writeFileSync(path.join(outDir, 'archive.bin'), archive.buffer);
     fs.writeFileSync(path.join(outDir, 'nonce.bin'), nonce.buffer);
     fs.writeFileSync(path.join(outDir, 'tag.bin'), tag.buffer);
 
-    return res.json({ success: true, message: '备份上传成功' });
+    return res.json({
+      success: true,
+      message: '备份上传成功',
+      archiveHash,
+      backupName: path.basename(outDir)
+    });
   } catch (error) {
     console.error('备份上传失败:', error.message);
     return res.status(500).json({ success: false, message: '备份上传失败' });

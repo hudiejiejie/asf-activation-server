@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "dedupe:backups": "node dedupe-backups.js",
+    "dedupe:backups:dry": "node dedupe-backups.js --dry-run",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

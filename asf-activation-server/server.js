@@ -20,11 +20,16 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'change-me-in-production';
 const BACKUP_API_KEY = process.env.BACKUP_API_KEY || ADMIN_API_KEY;
 
-// 数据库文件
-const DB_FILE = process.env.DB_FILE || 'activation.db';
-const BACKUP_ROOT = process.env.BACKUP_ROOT || path.join(__dirname, 'data', 'backups');
+// 数据目录（优先显式配置，其次回落到项目内 data）
+const DATA_ROOT = process.env.DATA_ROOT || path.join(__dirname, 'data');
+const DB_FILE = process.env.DB_FILE || path.join(DATA_ROOT, 'activation.db');
+const BACKUP_ROOT = process.env.BACKUP_ROOT || path.join(DATA_ROOT, 'backups');
+fs.mkdirSync(DATA_ROOT, { recursive: true });
 fs.mkdirSync(BACKUP_ROOT, { recursive: true });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 512 } });
+console.log('数据目录:', DATA_ROOT);
+console.log('数据库文件:', DB_FILE);
+console.log('备份目录:', BACKUP_ROOT);
 
 // ============================================
 // 中间件配置

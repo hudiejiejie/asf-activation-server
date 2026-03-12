@@ -116,12 +116,92 @@ function safeReadJson(filePath) {
   }
 }
 
+const recentBackupUploads = new Map();
+const RECENT_BACKUP_TTL_MS = 10 * 60 * 1000;
+
+function pruneRecentBackupUploads() {
+  const now = Date.now();
+  for (const [key, value] of recentBackupUploads.entries()) {
+    if (!value?.at || (now - value.at) > RECENT_BACKUP_TTL_MS) {
+      recentBackupUploads.delete(key);
+    }
+  }
+}
+
+function buildBackupDedupeKeys(machineId, metadata, archiveHash) {
+  const keys = [`${machineId}:hash:${archiveHash}`];
+  const contentSignature = String(metadata?.contentSignature || '').trim();
+  if (contentSignature) {
+    keys.push(`${machineId}:sig:${contentSignature}`);
+  }
+  return keys;
+}
+
+function hasRecentBackupDuplicate(dedupeKeys) {
+  pruneRecentBackupUploads();
+  for (const key of dedupeKeys) {
+    if (recentBackupUploads.has(key)) {
+      return key;
+    }
+  }
+  return null;
+}
+
+function markRecentBackupUploads(dedupeKeys, extra = {}) {
+  const payload = { at: Date.now(), ...extra };
+  for (const key of dedupeKeys) {
+    recentBackupUploads.set(key, payload);
+  }
+}
+
+function clearRecentBackupUploads(dedupeKeys) {
+  for (const key of dedupeKeys) {
+    recentBackupUploads.delete(key);
+  }
+}
+
+function getBackupLockDir(machineDir) {
+  return path.join(machineDir, '.upload-locks');
+}
+
+function acquireBackupLock(machineDir, archiveHash, metadata = {}) {
+  const lockDir = getBackupLockDir(machineDir);
+  fs.mkdirSync(lockDir, { recursive: true });
+  const lockPath = path.join(lockDir, `${archiveHash}.lock.json`);
+  try {
+    fs.writeFileSync(lockPath, JSON.stringify({
+      archiveHash,
+      machineId: metadata.machineId || null,
+      contentSignature: metadata.contentSignature || null,
+      createdAt: new Date().toISOString()
+    }, null, 2), { flag: 'wx' });
+    return lockPath;
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function releaseBackupLock(lockPath) {
+  if (!lockPath) return;
+  try {
+    if (fs.existsSync(lockPath)) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch (error) {
+    console.warn('释放备份锁失败:', lockPath, error.message);
+  }
+}
+
 function getBackupDirs(machineDir) {
   if (!fs.existsSync(machineDir)) {
     return [];
   }
 
   return fs.readdirSync(machineDir)
+    .filter(name => !String(name).startsWith('.'))
     .map(name => ({
       name,
       dir: path.join(machineDir, name)
@@ -679,42 +759,74 @@ app.post('/api/backup/upload', backupLimiter, requireBackupAuth, upload.fields([
     fs.mkdirSync(machineDir, { recursive: true });
 
     const archiveHash = sha256Buffer(archive.buffer);
-    const duplicate = findDuplicateBackup(machineDir, metadata, archiveHash);
-    if (duplicate) {
+    const dedupeKeys = buildBackupDedupeKeys(machineId, metadata, archiveHash);
+
+    const recentDuplicateKey = hasRecentBackupDuplicate(dedupeKeys);
+    if (recentDuplicateKey) {
       return res.json({
         success: true,
         skipped: true,
-        message: '相同内容，已跳过去重备份',
-        duplicateBy: duplicate.type,
-        existingBackup: duplicate.backupName
+        message: '相同内容短时间内重复上传，已跳过',
+        duplicateBy: 'recentCache',
+        duplicateKey: recentDuplicateKey
       });
     }
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const random = crypto.randomBytes(4).toString('hex');
-    const outDir = path.join(machineDir, `${stamp}_${random}`);
-    fs.mkdirSync(outDir, { recursive: true });
+    const lockPath = acquireBackupLock(machineDir, archiveHash, metadata);
+    if (!lockPath) {
+      markRecentBackupUploads(dedupeKeys, { reason: 'in-progress' });
+      return res.json({
+        success: true,
+        skipped: true,
+        message: '相同内容正在处理中，已跳过重复上传',
+        duplicateBy: 'inProgressLock'
+      });
+    }
 
-    const metaToSave = {
-      ...metadata,
-      algorithm,
-      archiveHash,
-      uploadedAt: new Date().toISOString(),
-      archiveSize: archive.size || archive.buffer?.length || 0,
-      dedupeVersion: 2
-    };
+    markRecentBackupUploads(dedupeKeys, { reason: 'processing' });
 
-    fs.writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify(metaToSave, null, 2));
-    fs.writeFileSync(path.join(outDir, 'archive.bin'), archive.buffer);
-    fs.writeFileSync(path.join(outDir, 'nonce.bin'), nonce.buffer);
-    fs.writeFileSync(path.join(outDir, 'tag.bin'), tag.buffer);
+    try {
+      const duplicate = findDuplicateBackup(machineDir, metadata, archiveHash);
+      if (duplicate) {
+        markRecentBackupUploads(dedupeKeys, { reason: duplicate.type, backupName: duplicate.backupName });
+        return res.json({
+          success: true,
+          skipped: true,
+          message: '相同内容，已跳过去重备份',
+          duplicateBy: duplicate.type,
+          existingBackup: duplicate.backupName
+        });
+      }
 
-    return res.json({
-      success: true,
-      message: '备份上传成功',
-      archiveHash,
-      backupName: path.basename(outDir)
-    });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const random = crypto.randomBytes(4).toString('hex');
+      const outDir = path.join(machineDir, `${stamp}_${random}`);
+      fs.mkdirSync(outDir, { recursive: true });
+
+      const metaToSave = {
+        ...metadata,
+        algorithm,
+        archiveHash,
+        uploadedAt: new Date().toISOString(),
+        archiveSize: archive.size || archive.buffer?.length || 0,
+        dedupeVersion: 3
+      };
+
+      fs.writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify(metaToSave, null, 2));
+      fs.writeFileSync(path.join(outDir, 'archive.bin'), archive.buffer);
+      fs.writeFileSync(path.join(outDir, 'nonce.bin'), nonce.buffer);
+      fs.writeFileSync(path.join(outDir, 'tag.bin'), tag.buffer);
+
+      markRecentBackupUploads(dedupeKeys, { reason: 'saved', backupName: path.basename(outDir) });
+      return res.json({
+        success: true,
+        message: '备份上传成功',
+        archiveHash,
+        backupName: path.basename(outDir)
+      });
+    } finally {
+      releaseBackupLock(lockPath);
+    }
   } catch (error) {
     console.error('备份上传失败:', error.message);
     return res.status(500).json({ success: false, message: '备份上传失败' });
@@ -730,17 +842,11 @@ app.get('/api/backup/list/:machineId', backupLimiter, requireBackupAuth, (req, r
       return res.json({ success: true, items: [] });
     }
 
-    const items = fs.readdirSync(dir)
-      .sort()
-      .reverse()
-      .map(name => {
-        const metaPath = path.join(dir, name, 'meta.json');
-        let meta = null;
-        if (fs.existsSync(metaPath)) {
-          meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        }
-        return { machineId, name, meta };
-      });
+    const items = getBackupDirs(dir).map(item => {
+      const metaPath = path.join(item.dir, 'meta.json');
+      const meta = safeReadJson(metaPath);
+      return { machineId, name: item.name, meta };
+    });
 
     return res.json({ success: true, items });
   } catch (error) {
@@ -760,15 +866,10 @@ app.get('/api/backup/all', backupLimiter, requireBackupAuth, (req, res) => {
       const machineDir = path.join(BACKUP_ROOT, machineId);
       if (!fs.statSync(machineDir).isDirectory()) continue;
 
-      for (const name of fs.readdirSync(machineDir).sort().reverse()) {
-        const backupDir = path.join(machineDir, name);
-        if (!fs.statSync(backupDir).isDirectory()) continue;
-        const metaPath = path.join(backupDir, 'meta.json');
-        let meta = null;
-        if (fs.existsSync(metaPath)) {
-          meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        }
-        items.push({ machineId, name, meta });
+      for (const item of getBackupDirs(machineDir)) {
+        const metaPath = path.join(item.dir, 'meta.json');
+        const meta = safeReadJson(metaPath);
+        items.push({ machineId, name: item.name, meta });
       }
     }
 
@@ -798,7 +899,6 @@ app.post('/api/backup/clear-all', backupLimiter, requireBackupAuth, (req, res) =
           totalDeleted++;
         }
       }
-      // 清理空的机器目录
       try { if (fs.readdirSync(machineDir).length === 0) fs.rmdirSync(machineDir); } catch {}
     }
 
@@ -806,6 +906,67 @@ app.post('/api/backup/clear-all', backupLimiter, requireBackupAuth, (req, res) =
   } catch (error) {
     console.error('清空备份失败:', error.message);
     return res.status(500).json({ success: false, message: '清空失败', error: error.message });
+  }
+});
+
+function deleteBackupDir(machineIdRaw, backupIdRaw) {
+  const machineId = String(machineIdRaw || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const backupId = String(backupIdRaw || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const fullDir = path.join(BACKUP_ROOT, machineId, backupId);
+
+  if (!fs.existsSync(fullDir) || !fs.statSync(fullDir).isDirectory()) {
+    return { success: false, machineId, backupId, message: '备份目录不存在' };
+  }
+
+  fs.rmSync(fullDir, { recursive: true, force: true });
+
+  const machineDir = path.join(BACKUP_ROOT, machineId);
+  try {
+    const remaining = fs.existsSync(machineDir)
+      ? fs.readdirSync(machineDir).filter(name => !String(name).startsWith('.'))
+      : [];
+    if (remaining.length === 0 && fs.existsSync(machineDir)) {
+      fs.rmSync(machineDir, { recursive: true, force: true });
+    }
+  } catch (error) {
+    console.warn('清理空机器目录失败:', machineId, error.message);
+  }
+
+  return { success: true, machineId, backupId };
+}
+
+app.delete('/api/backup/:machineId/:backupId', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    const result = deleteBackupDir(req.params.machineId, req.params.backupId);
+    if (!result.success) {
+      return res.status(404).json(result);
+    }
+    return res.json({ ...result, message: '备份已删除' });
+  } catch (error) {
+    console.error('删除备份失败:', error.message);
+    return res.status(500).json({ success: false, message: '删除备份失败', error: error.message });
+  }
+});
+
+app.post('/api/backup/delete', backupLimiter, requireBackupAuth, (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (items.length === 0) {
+      return res.status(400).json({ success: false, message: '缺少要删除的备份列表' });
+    }
+
+    const results = [];
+    let deleted = 0;
+    for (const item of items) {
+      const result = deleteBackupDir(item.machineId, item.backupId || item.name);
+      results.push(result);
+      if (result.success) deleted++;
+    }
+
+    return res.json({ success: true, deleted, total: items.length, results, message: `已删除 ${deleted}/${items.length} 个备份` });
+  } catch (error) {
+    console.error('批量删除备份失败:', error.message);
+    return res.status(500).json({ success: false, message: '批量删除备份失败', error: error.message });
   }
 });
 

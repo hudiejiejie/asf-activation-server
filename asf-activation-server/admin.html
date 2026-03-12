@@ -437,9 +437,10 @@
   <div id="tab-backups" class="card tab-content">
     <h2>备份恢复</h2>
 
-    <div style="margin-bottom: 15px;">
+    <div style="margin-bottom: 15px; display: flex; gap: 8px; flex-wrap: wrap;">
       <button class="btn btn-small" onclick="loadBackups()">加载全部备份</button>
       <button class="btn btn-small" onclick="clearBackups()">清空列表</button>
+      <button class="btn btn-small btn-danger" onclick="deleteSelectedBackups()">删除选中</button>
     </div>
 
     <div id="backupResult" style="margin-bottom: 15px;"></div>
@@ -448,6 +449,7 @@
       <table id="backupsTable">
         <thead>
           <tr>
+            <th><input type="checkbox" id="selectAllBackups" onchange="toggleSelectAllBackups(this)"></th>
             <th>机器ID</th>
             <th>备份目录</th>
             <th>时间</th>
@@ -495,6 +497,7 @@ let allCodes = [];
 let allMachines = [];
 let allLogs = [];
 let allBackups = [];
+let selectedBackups = new Set();
 
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
@@ -844,26 +847,115 @@ async function loadBackups() {
 
 function clearBackups() {
   allBackups = [];
+  selectedBackups = new Set();
   document.querySelector('#backupsTable tbody').innerHTML = '';
   document.getElementById('backupResult').innerHTML = '';
+  const selectAll = document.getElementById('selectAllBackups');
+  if (selectAll) selectAll.checked = false;
+}
+
+function backupSelectionKey(machineId, backupId) {
+  return `${machineId}|||${backupId}`;
+}
+
+function formatMachineId(machineId) {
+  if (!machineId || machineId === '-') return '-';
+  if (machineId.length <= 28) return machineId;
+  return `${machineId.slice(0, 10)}...${machineId.slice(-10)}`;
+}
+
+function toggleBackupSelection(machineId, backupId, checked) {
+  const key = backupSelectionKey(machineId, backupId);
+  if (checked) {
+    selectedBackups.add(key);
+  } else {
+    selectedBackups.delete(key);
+  }
+}
+
+function toggleSelectAllBackups(el) {
+  const checked = !!el.checked;
+  document.querySelectorAll('.backup-checkbox').forEach(cb => {
+    cb.checked = checked;
+    toggleBackupSelection(cb.dataset.machineId, cb.dataset.backupId, checked);
+  });
+}
+
+async function deleteBackup(machineId, backupId) {
+  if (!confirm(`确定删除备份 ${backupId} 吗？此操作不可恢复。`)) {
+    return;
+  }
+
+  const apiKey = getApiKey();
+  try {
+    const res = await fetch(`/api/backup/${encodeURIComponent(machineId)}/${encodeURIComponent(backupId)}?apiKey=${encodeURIComponent(apiKey)}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!data.success) {
+      throw new Error(data.message || '删除失败');
+    }
+    showAlert(`已删除备份 ${backupId}`, 'success', 'backupResult');
+    await loadBackups();
+  } catch (e) {
+    showAlert('删除备份失败: ' + e.message, 'error', 'backupResult');
+  }
+}
+
+async function deleteSelectedBackups() {
+  const apiKey = getApiKey();
+  const items = Array.from(selectedBackups).map(key => {
+    const [machineId, backupId] = key.split('|||');
+    return { machineId, backupId };
+  });
+
+  if (items.length === 0) {
+    showAlert('请先勾选要删除的备份', 'error', 'backupResult');
+    return;
+  }
+
+  if (!confirm(`确定批量删除 ${items.length} 个备份吗？此操作不可恢复。`)) {
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/backup/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey, items })
+    });
+    const data = await res.json();
+    if (!data.success) {
+      throw new Error(data.message || '批量删除失败');
+    }
+    showAlert(data.message || `已删除 ${data.deleted}/${data.total} 个备份`, 'success', 'backupResult');
+    selectedBackups = new Set();
+    await loadBackups();
+  } catch (e) {
+    showAlert('批量删除失败: ' + e.message, 'error', 'backupResult');
+  }
 }
 
 function renderBackupsTable(items) {
   const tbody = document.querySelector('#backupsTable tbody');
   tbody.innerHTML = items.map(item => {
-    const createdAt = item.meta?.createdAtUtc ? new Date(item.meta.createdAtUtc).toLocaleString() : '-';
+    const createdAt = item.meta?.createdAtUtc ? new Date(item.meta.createdAtUtc).toLocaleString() : (item.meta?.uploadedAt ? new Date(item.meta.uploadedAt).toLocaleString() : '-');
     const reason = item.meta?.reason || '-';
     const count = item.meta?.fileCount ?? '-';
     const machineId = item.machineId || item.meta?.machineId || '-';
+    const shortMachineId = formatMachineId(machineId);
+    const selected = selectedBackups.has(backupSelectionKey(machineId, item.name));
     return `
       <tr>
-        <td style="font-family: monospace; font-size: 12px;">${machineId}</td>
+        <td><input type="checkbox" class="backup-checkbox" data-machine-id="${machineId}" data-backup-id="${item.name}" ${selected ? 'checked' : ''} onchange="toggleBackupSelection('${machineId}', '${item.name}', this.checked)"></td>
+        <td style="font-family: monospace; font-size: 12px;" title="${machineId}">${shortMachineId}</td>
         <td style="font-family: monospace; font-size: 12px;">${item.name}</td>
         <td>${createdAt}</td>
         <td>${reason}</td>
         <td>${count}</td>
-        <td>
+        <td style="display:flex; gap:6px; flex-wrap:wrap;">
           <button class="btn btn-small btn-success" onclick="downloadBackupZip('${machineId}', '${item.name}')">下载恢复 ZIP</button>
+          <button class="btn btn-small btn-danger" onclick="deleteBackup('${machineId}', '${item.name}')">删除</button>
         </td>
       </tr>
     `;

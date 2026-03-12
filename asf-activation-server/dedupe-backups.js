@@ -45,6 +45,7 @@ for (const machineId of fs.readdirSync(BACKUP_ROOT)) {
   totalMachines++;
 
   const backups = fs.readdirSync(machineDir)
+    .filter(name => !String(name).startsWith('.'))
     .map(name => ({ name, dir: path.join(machineDir, name) }))
     .filter(item => fs.existsSync(item.dir) && fs.statSync(item.dir).isDirectory())
     .sort((a, b) => String(b.name).localeCompare(String(a.name))); // newest first
